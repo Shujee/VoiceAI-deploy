@@ -1,0 +1,173 @@
+#!KAMAILIO
+#
+# Minimal SIP registrar + fixed-backend relay for the VoiceAI LAN SIP POC.
+#
+# Why this file exists: livekit-sip (the "sip" service) is an inbound
+# trunk gateway only - it explicitly ignores REGISTER (confirmed from its
+# own logs: "Inbound SIP request not handled", method REGISTER). Some SIP
+# clients (Linphone on Android, specifically) refuse to show a dialer at
+# all until an account successfully registers. This Kamailio instance
+# exists solely to satisfy that: it accepts ANY REGISTER with no
+# authentication (POC only - do not expose this to the internet), and
+# blind-forwards every other fresh request to the one fixed backend
+# (livekit-sip on the internal docker network, sip:5061) regardless of
+# the R-URI - this is not a real multi-tenant registrar, just a thin
+# compatibility shim in front of one trunk.
+#
+# record_route() on the INVITE leg matters: without it, in-dialog
+# requests (ACK/BYE/re-INVITE) would try to route directly between the
+# phone and livekit-sip's container-internal address, which the phone
+# cannot reach - hangup would silently fail to reach livekit-sip. With
+# record_route(), both sides address in-dialog requests back through us.
+#
+# RTP/media does NOT go through this proxy - it flows directly between
+# the phone and livekit-sip's published RTP ports (see docker-compose.yml
+# `sip` service), unaffected by this file.
+#
+# NOTE: this is a .template file, not the live config. infra/render-
+# config.ps1 substitutes __SIP_LAN_IP__ below with SIP_LAN_IP from the
+# top-level .env and writes the result to kamailio.cfg (gitignored,
+# regenerated) - that's the file docker-compose.yml actually mounts. Edit
+# THIS file for any other change, not the generated kamailio.cfg.
+
+debug=2
+log_stderror=yes
+fork=yes
+children=4
+auto_aliases=no
+
+# 'advertise' is rendered from SIP_LAN_IP (top-level .env, the single
+# source of truth for this machine's externally-reachable IP) - see the
+# NOTE above and infra/render-config.sh. PAST NOTE (2026-09-07) for why
+# this has to be a real externally-reachable address, never a private
+# 192.168.x.x one on a cloud VM: a mismatch here breaks ACK/BYE delivery
+# for every caller, not just off-LAN ones ("no ACK received for 200 OK"
+# and "no response to BYE" in livekit/sip's own logs) - without this
+# matching, record_route() below would advertise an address the caller
+# can never reach, and the phone wouldn't be able to route ACK/BYE back
+# to us after the call connects (signaling would get stuck, even though
+# the initial INVITE/RTP still work).
+listen=udp:0.0.0.0:5060 advertise __SIP_LAN_IP__:5060
+port=5060
+
+####### Modules ########
+
+# tm must load before sl - sl's mod_init() optionally binds tm's API, and
+# logs "could not bind tm module" (falling back to stateless-only) if tm
+# hasn't initialized yet, which happens if sl is loaded first.
+loadmodule "tm.so"
+loadmodule "sl.so"
+loadmodule "rr.so"
+loadmodule "maxfwd.so"
+loadmodule "usrloc.so"
+loadmodule "registrar.so"
+loadmodule "siputils.so"
+loadmodule "textops.so"
+
+# pv.so: $du (destination URI, set by hand in the has_totag() branch
+# below) turned out to need this loaded in this exact kamailio build -
+# removing it during cleanup broke parsing ("Can't get from cache: $du",
+# 2026-09-01). Confirmed to initialize with zero modparams (unlike
+# siputils above) - no default-value parse crash risk.
+loadmodule "pv.so"
+
+modparam("usrloc", "db_mode", 0)
+
+# siputils' mod_init() unconditionally tries to parse its rpid_avp default
+# ("$avp(s:rpid)") for RPID-header features (append_rpid_hf,
+# is_rpid_user_e164) that this cfg never calls - and that default fails to
+# parse on this image ("wrong char" in $avp(s:rpid), core pvapi.c),
+# crashing the whole module init. We only load siputils for has_totag(),
+# so disable rpid_avp entirely per its own docs ("If defined to NULL
+# string, all RPID functions will fail at runtime" - fine, we never call
+# them).
+modparam("siputils", "rpid_avp", "")
+
+####### Routing ########
+
+request_route {
+
+    if (!mf_process_maxfwd_header("10")) {
+        sl_send_reply("483", "Too Many Hops");
+        exit;
+    }
+
+    # In-dialog requests (ACK, BYE, re-INVITE, ...) - route via the
+    # Route set left by record_route() below, not by R-URI.
+    #
+    # ROOT CAUSE + FIX (2026-09-01, confirmed from real sip/sip-registrar
+    # logs): calls used to sit in an unconfirmed state for their whole
+    # duration ("Call accepted, but no ACK received" on every single
+    # call, in livekit-sip's own log) and a real hangup's BYE never got a
+    # response either - both symptoms of the SAME bug, not two separate
+    # ones. loose_route() succeeding here leaves $du unset whenever this
+    # proxy was the last hop in the Route set (the normal case, since
+    # record_route() only ever adds ourselves once) - RFC 3261 loose
+    # routing then falls back to relaying by the request's own R-URI,
+    # which turned out to be livekit-sip's own Contact address
+    # (sip:192.168.1.5:5061 - this machine's own LAN-facing address, NOT
+    # the docker-internal "sip" hostname the initial INVITE below already
+    # correctly uses via t_relay("sip","5061")). That address isn't
+    # reachable from inside another container on this Docker Desktop/
+    # WSL2 setup (only the RTP port range is published - see
+    # docker-compose.yml), so every in-dialog request - ACK included -
+    # was silently vanishing before ever reaching livekit-sip. Forcing
+    # $du to the same trusted internal target the initial INVITE uses
+    # fixes both ACK and BYE delivery in one shot.
+    if (has_totag()) {
+        if (loose_route()) {
+            $du = "sip:sip:5061";
+            route(RELAY);
+            exit;
+        }
+        if (is_method("ACK")) {
+            exit;
+        }
+        sl_send_reply("404", "Not Found");
+        exit;
+    }
+
+    if (is_method("CANCEL")) {
+        if (t_check_trans()) {
+            t_relay();
+        }
+        exit;
+    }
+
+    if (is_method("REGISTER")) {
+        # POC only: no auth, accept anything, in-memory only (db_mode=0).
+        save("location");
+        exit;
+    }
+
+    if (!is_method("INVITE|ACK|OPTIONS|BYE")) {
+        sl_send_reply("405", "Method Not Allowed");
+        exit;
+    }
+
+    if (!t_newtran()) {
+        sl_reply_error();
+        exit;
+    }
+
+    if (is_method("INVITE")) {
+        record_route();
+    }
+
+    # Fixed single backend - not R-URI-based routing. t_relay(host, port)
+    # relays directly there by hostname, sidestepping R-URI/$du entirely
+    # for this first request. The in-dialog path above (has_totag()) sets
+    # $du by hand instead, to the same "sip:5061" target - see the ROOT
+    # CAUSE note there for why that turned out to be necessary too.
+    if (!t_relay("sip", "5061")) {
+        sl_reply_error();
+    }
+    exit;
+}
+
+route[RELAY] {
+    if (!t_relay()) {
+        sl_reply_error();
+    }
+    exit;
+}

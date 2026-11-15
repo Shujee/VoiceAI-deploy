@@ -1,0 +1,43 @@
+port: 7880
+
+rtc:
+  tcp_port: 7881
+  udp_port: 7882
+  # Rendered from SIP_LAN_IP (top-level .env, the single source of truth
+  # for this machine's externally-reachable IP) by infra/render-config.sh
+  # into the real infra/livekit/livekit.yaml - see that script's header
+  # comment. Re-run it any time SIP_LAN_IP changes (e.g. switching between
+  # a LAN test rig and a GCP VM) instead of hand-editing the generated
+  # file directly - it'll just get overwritten next render.
+  node_ip: __SIP_LAN_IP__
+
+# Required for SIP: LiveKit server's SIP management API (CreateSIPInboundTrunk,
+# CreateSIPDispatchRule, etc. - used by ai-runtime/src/setup-sip.ts) refuses
+# every call with "sip not connected (redis required)" unless LiveKit server
+# itself has its own redis connection, matching the one the `sip` service
+# already uses in docker-compose.yml's SIP_CONFIG_BODY - the two need to
+# share this same redis to coordinate SIP state at all.
+redis:
+  address: redis:6379
+
+keys:
+  devkey: 0123456789abcdef0123456789abcdef
+
+# Added for concurrent, multi-tenant call handling (see setup-sip.ts's
+# `type: 'individual'` dispatch rule, which makes every inbound call
+# create its own brand-new room instead of joining one fixed shared
+# room): this is how ai-runtime (test-token.ts) finds out a new room was
+# just created, since it no longer connects to a fixed room at boot.
+# api_key must be one of the keys above (its secret is what LiveKit signs
+# the webhook payload with, and what ai-runtime's WebhookReceiver
+# verifies against - see routes/webhooks.ts). ai-runtime:3001 is the
+# ai-runtime service's own docker-compose hostname/port (see
+# docker-compose.yml) - reachable over the shared voice-ai bridge network,
+# same as every other inter-service hostname in this stack.
+webhook:
+  api_key: devkey
+  urls:
+    - http://ai-runtime:3001/webhooks/livekit
+
+logging:
+  level: info

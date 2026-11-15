@@ -1,0 +1,17 @@
+# Root-level env file (docker-compose vars: POSTGRES_PASSWORD, REDIS_PASSWORD,
+# LIVEKIT_API_KEY/SECRET, SIP_LAN_IP, etc.) - was committed since the very
+# first commit because this file never existed, unlike backend/.gitignore
+# and ai-runtime/.gitignore, which already correctly excluded their own
+# .env files. Untracking now (see the commit that pairs with this file)
+# stops it going forward; it does NOT remove it from existing git history -
+# anyone with access to past commits can still retrieve the old values via
+# git log/git show. Rotate POSTGRES_PASSWORD/REDIS_PASSWORD if that matters
+# for your threat model - neither service is exposed to the host in
+# docker-compose.yml today, but that's a separate decision from this fix.
+.env
+
+# Generated from their .template counterparts by infra/render-config.sh
+# (substitutes SIP_LAN_IP from the top-level .env) - not the source of
+# truth, don't hand-edit or commit these. Edit the .template files instead.
+infra/livekit/livekit.yaml
+infra/kamailio/kamailio.cfg

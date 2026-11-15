@@ -1,0 +1,4 @@
+# Client-provided real call recordings + their transcripts - reference
+# material for prompt/KB tuning, not something to commit to source control.
+*.wav
+*.txt

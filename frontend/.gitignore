@@ -1,0 +1,37 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+.DS_Store
+dist
+dist-ssr
+coverage
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+*.tsbuildinfo
+.pnpm-store
+# frontend/.env - was committed since the very first commit, unlike
+# ai-runtime/.gitignore and backend/.gitignore, which already correctly
+# excluded their own .env files (same gap the root .env had - see the
+# root .gitignore's own comment and its pairing commit). Untracking now
+# stops a real deployment's local overrides (e.g. this project's GCP VM,
+# which needs its own public IP here instead of localhost) from being
+# silently reverted by every future `git pull` - see .env.example for the
+# placeholder values a fresh checkout should use.
+.env
